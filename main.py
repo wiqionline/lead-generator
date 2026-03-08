@@ -1,19 +1,11 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 from api.routes import router
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    print("[App] Starting AI Lead Generator...")
-    yield
-    print("[App] Shutting down...")
 
 app = FastAPI(
     title="AI Real Estate Lead Generator",
     description="Multi-agent pipeline for finding qualified real estate investors",
-    version="1.0.0",
-    lifespan=lifespan
+    version="1.0.0"
 )
 
 app.add_middleware(
@@ -30,13 +22,7 @@ async def root():
     return {
         "service": "AI Real Estate Lead Generator",
         "status": "running",
-        "docs": "/docs",
-        "endpoints": {
-            "run_pipeline": "POST /run",
-            "check_status": "GET /status/{job_id}",
-            "get_leads": "GET /leads",
-            "health": "GET /health"
-        }
+        "docs": "/docs"
     }
 
 if __name__ == "__main__":
@@ -46,5 +32,6 @@ if __name__ == "__main__":
         host="0.0.0.0",
         port=8000,
         reload=False,
-        workers=1
+        workers=1,
+        timeout_keep_alive=300
     )
