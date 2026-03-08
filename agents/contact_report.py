@@ -1,167 +1,161 @@
 """
 Contact Finder Agent + Report Generator Agent
 ──────────────────────────────────────────────
-Contact finder uses free public sources.
-Report generator uses Claude to write the final summary.
+100% FREE — no API calls.
+Contact finder uses DuckDuckGo public search.
+Report generator uses Python string formatting.
 """
 import httpx
 import asyncio
-import anthropic
-import json
 import re
 from typing import List
 from bs4 import BeautifulSoup
 from core.models import QualifiedLead
-from config.settings import settings
-
-client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 }
 
+
 # ══════════════════════════════════════════════════════════
-# CONTACT FINDER AGENT
+# CONTACT FINDER — free DuckDuckGo lookups
 # ══════════════════════════════════════════════════════════
 
 async def find_linkedin(name: str, company: str) -> str | None:
-    """Search for LinkedIn profile URL via DuckDuckGo."""
     try:
         query = f"site:linkedin.com/in {name} {company or ''} real estate investor"
-        url = "https://html.duckduckgo.com/html/"
-        async with httpx.AsyncClient(timeout=10, headers=HEADERS) as client_http:
-            resp = await client_http.post(url, data={"q": query})
+        async with httpx.AsyncClient(timeout=10, headers=HEADERS) as c:
+            resp = await c.post("https://html.duckduckgo.com/html/", data={"q": query})
             soup = BeautifulSoup(resp.text, "lxml")
             for result in soup.select(".result__url")[:3]:
-                link_text = result.get_text(strip=True)
-                if "linkedin.com/in/" in link_text:
-                    return "https://" + link_text if not link_text.startswith("http") else link_text
+                link = result.get_text(strip=True)
+                if "linkedin.com/in/" in link:
+                    return "https://" + link if not link.startswith("http") else link
     except Exception:
         pass
     return None
 
+
 async def guess_email(name: str, company: str) -> str | None:
-    """
-    Attempt to guess professional email using common patterns.
-    Only used when company domain is findable.
-    """
     if not company:
         return None
     try:
-        # Try to find company website
-        query = f"{company} official website contact email"
-        url = "https://html.duckduckgo.com/html/"
-        async with httpx.AsyncClient(timeout=10, headers=HEADERS) as client_http:
-            resp = await client_http.post(url, data={"q": query})
+        query = f"{company} official website contact"
+        async with httpx.AsyncClient(timeout=10, headers=HEADERS) as c:
+            resp = await c.post("https://html.duckduckgo.com/html/", data={"q": query})
             soup = BeautifulSoup(resp.text, "lxml")
             for result in soup.select(".result__url")[:2]:
                 domain_text = result.get_text(strip=True)
-                # Extract clean domain
-                domain_match = re.search(r"([a-z0-9\-]+\.[a-z]{2,})", domain_text)
-                if domain_match:
-                    domain = domain_match.group(1)
-                    # Skip social media and big sites
-                    if any(s in domain for s in ["linkedin", "facebook", "twitter", "google", "youtube"]):
+                match = re.search(r"([a-z0-9\-]+\.[a-z]{2,})", domain_text)
+                if match:
+                    domain = match.group(1)
+                    if any(s in domain for s in ["linkedin", "facebook", "twitter", "google"]):
                         continue
-                    # Generate likely email patterns from name
                     parts = name.lower().split()
                     if len(parts) >= 2:
-                        first, last = parts[0], parts[-1]
-                        return f"{first}.{last}@{domain}"
+                        return f"{parts[0]}.{parts[-1]}@{domain}"
     except Exception:
         pass
     return None
 
-async def run_contact_finder(leads: List[QualifiedLead]) -> List[QualifiedLead]:
-    """
-    Attempts to find contact info for top leads.
-    Only runs on high-score leads to save time and respect rate limits.
-    """
-    print(f"[ContactFinder] Finding contacts for {len(leads)} leads")
 
-    # Only attempt contact finding for top leads (score >= 70)
+async def run_contact_finder(leads: List[QualifiedLead]) -> List[QualifiedLead]:
+    print(f"[ContactFinder] Enriching top leads (free mode)")
     high_priority = [l for l in leads if l.score >= 70]
 
-    for lead in high_priority[:10]:  # Cap at 10 to avoid rate limits
+    for lead in high_priority[:8]:
         try:
-            # Find LinkedIn
             if not lead.linkedin and lead.name:
                 linkedin = await find_linkedin(lead.name, lead.company or "")
                 if linkedin:
                     lead.linkedin = linkedin
-
-            # Guess email
             if not lead.email and lead.company:
                 email = await guess_email(lead.name, lead.company)
                 if email:
                     lead.email = email
-
-            # Small delay between lookups
             await asyncio.sleep(1)
-
         except Exception as e:
             print(f"[ContactFinder] Error for {lead.name}: {e}")
             continue
 
-    print(f"[ContactFinder] Contact enrichment complete")
+    print(f"[ContactFinder] Enrichment complete")
     return leads
 
 
 # ══════════════════════════════════════════════════════════
-# REPORT GENERATOR AGENT
+# REPORT GENERATOR — pure Python, no API
 # ══════════════════════════════════════════════════════════
 
 async def run_report_generator(
     leads: List[QualifiedLead],
     original_query: str
 ) -> str:
-    """
-    Uses Claude to generate an executive summary of the lead run.
-    """
     print(f"[ReportGenerator] Generating report for {len(leads)} leads")
 
     if not leads:
-        return "No leads found for this search. Try broadening your query."
+        return "No leads found. Try broadening your search query."
 
-    top_leads_summary = []
-    for lead in leads[:10]:
-        top_leads_summary.append({
-            "name": lead.name,
-            "company": lead.company,
-            "type": lead.investor_type,
-            "score": lead.score,
-            "interest": lead.interest,
-            "location": lead.location,
-            "signal": lead.signal,
-        })
+    # Count by source
+    source_counts = {}
+    for lead in leads:
+        source_counts[lead.source] = source_counts.get(lead.source, 0) + 1
 
-    prompt = f"""You are a real estate intelligence analyst.
+    # Count by investor type
+    type_counts = {}
+    for lead in leads:
+        t = lead.investor_type or "Unknown"
+        type_counts[t] = type_counts.get(t, 0) + 1
 
-A lead generation pipeline ran for this target profile:
-"{original_query}"
+    # Top locations
+    locations = [l.location for l in leads if l.location and l.location != "Unknown"]
+    top_locations = list(dict.fromkeys(locations))[:4]
 
-Results: {len(leads)} qualified leads found.
+    # Score distribution
+    high = len([l for l in leads if l.score >= 80])
+    mid = len([l for l in leads if 60 <= l.score < 80])
+    low = len([l for l in leads if l.score < 60])
 
-Top 10 leads:
-{json.dumps(top_leads_summary, indent=2)}
+    sources_str = ", ".join(f"{s} ({c})" for s, c in source_counts.items())
+    types_str = ", ".join(f"{t} ({c})" for t, c in type_counts.items())
+    locations_str = ", ".join(top_locations) if top_locations else "Various"
 
-Write a brief executive summary (4–6 sentences) covering:
-1. Overall quality of leads found
-2. Most promising investor types and locations
-3. Key investment signals observed
-4. Recommended next steps for outreach
+    report = f"""Pipeline completed for: "{original_query}"
 
-Be direct and specific. Use a professional, confident tone."""
+SUMMARY
+───────
+Total leads found : {len(leads)}
+High priority (80+): {high} leads
+Medium (60-79)    : {mid} leads
+Lower priority    : {low} leads
 
-    try:
-        response = client.messages.create(
-            model=settings.claude_model,
-            max_tokens=500,
-            messages=[{"role": "user", "content": prompt}]
-        )
-        summary = response.content[0].text.strip()
-        print(f"[ReportGenerator] Report generated")
-        return summary
-    except Exception as e:
-        print(f"[ReportGenerator] Error: {e}")
-        return f"Pipeline completed. {len(leads)} leads found and qualified."
+SOURCES
+───────
+{sources_str}
+
+INVESTOR TYPES
+──────────────
+{types_str}
+
+TOP LOCATIONS
+─────────────
+{locations_str}
+
+TOP 3 LEADS
+───────────"""
+
+    for i, lead in enumerate(leads[:3], 1):
+        report += f"""
+{i}. {lead.name}
+   Score    : {lead.score}/100
+   Type     : {lead.investor_type}
+   Interest : {lead.interest}
+   Signal   : {lead.signal[:100] if lead.signal else 'N/A'}
+   Approach : {lead.recommended_approach}"""
+
+    report += "\n\nNEXT STEPS\n──────────\n"
+    report += "1. Review high-priority leads and verify profiles manually\n"
+    report += "2. Reach out via LinkedIn or email with personalized messages\n"
+    report += "3. Reference their specific investment interest in your outreach\n"
+    report += "4. Add medium-priority leads to a nurture sequence"
+
+    return report
