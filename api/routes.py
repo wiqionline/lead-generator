@@ -1,42 +1,36 @@
-from fastapi import APIRouter, BackgroundTasks, HTTPException
+from fastapi import APIRouter, HTTPException
 from core.models import RunRequest, PipelineJob
-from core.database import get_job, get_leads, clear_leads, create_job
+from core.database import get_job, get_leads, clear_leads, create_job, update_job_stage
 from agents.manager import run_pipeline
 import asyncio
 
 router = APIRouter()
 
-# ── Background task wrapper ───────────────────────────────
-async def pipeline_task(request: RunRequest, job_id: str):
-    """Runs pipeline in background — updates job in database."""
-    try:
-        await run_pipeline(request)
-    except Exception as e:
-        print(f"[Routes] Pipeline task error: {e}")
-
 # ── POST /run ─────────────────────────────────────────────
 @router.post("/run", response_model=dict)
-async def run_lead_generation(
-    request: RunRequest,
-    background_tasks: BackgroundTasks
-):
-    """Start a lead generation pipeline. Returns job_id immediately."""
-    job = PipelineJob(query=request.query)
-    await create_job(job)
-
-    # Add to background tasks — Railway compatible
-    background_tasks.add_task(pipeline_task, request, job.job_id)
-
-    return {
-        "job_id": job.job_id,
-        "status": "started",
-        "message": f"Pipeline started. Poll /status/{job.job_id} to check progress."
-    }
+async def run_lead_generation(request: RunRequest):
+    """
+    Runs the full pipeline and returns results when complete.
+    Synchronous — waits for completion (2-3 minutes max).
+    """
+    print(f"[Routes] Starting pipeline for: {request.query}")
+    try:
+        job = await run_pipeline(request)
+        return {
+            "job_id": job.job_id,
+            "status": job.status,
+            "leads_found": job.leads_found,
+            "error": job.error,
+            "message": f"Done! Found {job.leads_found} leads. Call GET /leads?job_id={job.job_id}"
+        }
+    except Exception as e:
+        print(f"[Routes] Pipeline error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── GET /status/{job_id} ──────────────────────────────────
 @router.get("/status/{job_id}")
 async def get_status(job_id: str):
-    """Check pipeline status."""
+    """Check the status of a pipeline job."""
     job = await get_job(job_id)
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -45,7 +39,7 @@ async def get_status(job_id: str):
 # ── GET /leads ────────────────────────────────────────────
 @router.get("/leads")
 async def list_leads(job_id: str = None, min_score: int = 0):
-    """Get all leads, optionally filtered by job_id or min_score."""
+    """Get all leads. Filter by job_id or min_score."""
     leads = await get_leads(job_id)
     if min_score > 0:
         leads = [l for l in leads if l.get("score", 0) >= min_score]
