@@ -10,6 +10,7 @@ class Settings(BaseSettings):
     telegram_api_id: Optional[str] = None
     telegram_api_hash: Optional[str] = None
     telegram_phone: Optional[str] = None
+    fb_cookie: Optional[str] = None
     app_env: str = "production"
     max_leads_per_run: int = 20
     claude_model: str = "claude-3-5-haiku-20241022"
