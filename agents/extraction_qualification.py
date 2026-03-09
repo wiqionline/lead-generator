@@ -92,6 +92,7 @@ PLATFORM_SOURCE_MAP = {
     "meetup": "Meetup",
     "youtube_webinar": "YouTube Webinar",
     "expo": "Expo/Exhibition",
+    "facebook_group": "Facebook Group",
 }
 
 
@@ -321,6 +322,7 @@ def score_lead(item: dict, query: str) -> tuple[int, str]:
         "youtube": 6, "web_search": 8, "forums_news": 10,
         "event_google": 18, "eventbrite": 20, "meetup": 16,
         "youtube_webinar": 14, "expo": 22,
+        "facebook_group": 25,
     }
     platform = item.get("platform", "web_search")
     p_score = platform_scores.get(platform, 8)

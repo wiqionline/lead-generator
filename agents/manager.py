@@ -1,98 +1,111 @@
 """
-Manager Agent
-─────────────
-Orchestrates the full 5-stage pipeline.
-Handles job tracking, stage updates, and error recovery.
+Pipeline Manager — Orchestrates all 6 agents
+──────────────────────────────────────────────
+AGENT 1 — DLD Transaction Scraper    → Real buyers from property records
+AGENT 2 — LinkedIn Intent Scraper    → Investors who posted publicly
+AGENT 3 — Apollo.io Enricher         → Verified phone + email
+AGENT 4 — Telegram Intent Monitor    → Real buyer messages (zero spam)
+AGENT 5 — Lead Scorer                → Quality score 0-100
+AGENT 6 — Report Generator           → Clean actionable summary
+
+Facebook group monitor also runs if FB_EMAIL is set.
 """
 import asyncio
-from typing import List
-from core.models import PipelineJob, QualifiedLead, RunRequest
+from core.models import RunRequest, PipelineJob, QualifiedLead
 from core.database import (
-    create_job, update_job_stage, complete_job,
-    fail_job, save_leads
+    create_job, update_job_stage,
+    complete_job, fail_job, save_leads
 )
-from agents.discovery import run_discovery
-from agents.extraction_qualification import run_extraction, run_qualification
-from agents.contact_report import run_contact_finder, run_report_generator
 
-# ── Stage names (used for status tracking) ────────────────
-STAGE_DISCOVERY    = "discovery"
-STAGE_EXTRACTION   = "extraction"
-STAGE_QUALIFICATION = "qualification"
-STAGE_CONTACT      = "contact_finder"
-STAGE_REPORT       = "report_generator"
-STAGE_DONE         = "done"
+# Import all agents
+from agents.agent_dld import run_dld_agent
+from agents.agent_linkedin import run_linkedin_agent
+from agents.agent_telegram_intent import run_telegram_intent_agent
+from agents.monitor_facebook import run_facebook_monitor
+from agents.agent_scorer import run_scorer_agent
+from agents.agent_apollo import run_apollo_enrichment
+from agents.agent_reporter import run_reporter_agent
 
 
 async def run_pipeline(request: RunRequest) -> PipelineJob:
     """
-    Main orchestration function.
-    Runs all 5 agents in sequence, tracks progress, handles errors.
-    Returns a completed PipelineJob with results saved to database.
+    Full 6-agent pipeline. Runs background, updates DB at each stage.
     """
-    # Create the job record
     job = PipelineJob(query=request.query)
     await create_job(job)
-    print(f"\n[Manager] Job {job.job_id} started")
-    print(f"[Manager] Query: {request.query}")
+    query = request.query
+    max_leads = request.max_leads or 20
+
+    print(f"\n{'='*50}")
+    print(f"PIPELINE START: {query}")
+    print(f"{'='*50}")
 
     try:
-        # ── Stage 1: Discovery ─────────────────────────────
-        print(f"\n[Manager] → Stage 1: Discovery")
-        await update_job_stage(job.job_id, STAGE_DISCOVERY)
-        raw_leads = await run_discovery(request.query, max_leads=request.max_leads)
+        # ── STAGE 1: Source Collection ─────────────────────
+        await update_job_stage(job.job_id, "collecting_sources")
+        print("\n[Pipeline] Stage 1 — Collecting from all sources...")
 
-        if not raw_leads:
-            raise ValueError("Discovery found no results. Try a different query.")
+        # Run all source agents concurrently
+        results = await asyncio.gather(
+            run_dld_agent(query),           # Agent 1
+            run_linkedin_agent(query),      # Agent 2
+            run_telegram_intent_agent(query), # Agent 4
+            run_facebook_monitor(query),    # Facebook bonus
+            return_exceptions=True
+        )
 
-        # ── Stage 2: Extraction ────────────────────────────
-        print(f"\n[Manager] → Stage 2: Extraction")
-        await update_job_stage(job.job_id, STAGE_EXTRACTION)
-        extracted = await run_extraction(raw_leads, request.query)
+        all_raw = []
+        agent_names = ["DLD", "LinkedIn", "Telegram", "Facebook"]
+        for i, result in enumerate(results):
+            if isinstance(result, list):
+                print(f"  ✓ {agent_names[i]}: {len(result)} signals")
+                all_raw.extend(result)
+            else:
+                print(f"  ✗ {agent_names[i]}: {result}")
 
-        if not extracted:
-            raise ValueError("Could not extract structured data from search results.")
+        print(f"\n[Pipeline] Total raw signals: {len(all_raw)}")
 
-        # ── Stage 3: Qualification ─────────────────────────
-        print(f"\n[Manager] → Stage 3: Qualification")
-        await update_job_stage(job.job_id, STAGE_QUALIFICATION)
-        qualified_leads = await run_qualification(extracted, request.query, request.max_leads)
+        if not all_raw:
+            await fail_job(job.job_id, "No signals found from any source")
+            job.status = "failed"
+            job.error = "No signals found"
+            return job
 
-        # ── Stage 4: Contact Finder ────────────────────────
-        print(f"\n[Manager] → Stage 4: Contact Finder")
-        await update_job_stage(job.job_id, STAGE_CONTACT)
-        enriched_leads = await run_contact_finder(qualified_leads)
+        # ── STAGE 2: Scoring ───────────────────────────────
+        await update_job_stage(job.job_id, "scoring_leads")
+        print("\n[Pipeline] Stage 2 — Scoring and qualifying...")
+        qualified = await run_scorer_agent(all_raw, query, max_leads)
+        print(f"  ✓ {len(qualified)} leads qualified")
 
-        # ── Stage 5: Report Generator ──────────────────────
-        print(f"\n[Manager] → Stage 5: Report Generator")
-        await update_job_stage(job.job_id, STAGE_REPORT)
-        summary = await run_report_generator(enriched_leads, request.query)
+        # ── STAGE 3: Contact Enrichment ────────────────────
+        await update_job_stage(job.job_id, "enriching_contacts")
+        print("\n[Pipeline] Stage 3 — Enriching with Apollo.io...")
+        enriched = await run_apollo_enrichment(qualified)  # Agent 3
 
-        # ── Save results ───────────────────────────────────
-        await save_leads(enriched_leads, job.job_id)
-        await complete_job(job.job_id, len(enriched_leads))
+        # ── STAGE 4: Report ────────────────────────────────
+        await update_job_stage(job.job_id, "generating_report")
+        print("\n[Pipeline] Stage 4 — Generating report...")
+        report = await run_reporter_agent(enriched, query)
+        print(report)
+
+        # ── STAGE 5: Save to database ──────────────────────
+        await update_job_stage(job.job_id, "saving")
+        await save_leads(enriched, job.job_id)
+        await complete_job(job.job_id, len(enriched))
+
+        print(f"\n{'='*50}")
+        print(f"PIPELINE COMPLETE: {len(enriched)} leads saved")
+        print(f"{'='*50}\n")
 
         job.status = "done"
-        job.leads_found = len(enriched_leads)
-        job.current_stage = STAGE_DONE
-
-        print(f"\n[Manager] ✓ Job {job.job_id} complete — {len(enriched_leads)} leads saved")
-        print(f"[Manager] Summary: {summary[:120]}...")
-
+        job.leads_found = len(enriched)
         return job
 
     except Exception as e:
-        error_msg = str(e)
-        print(f"\n[Manager] ✗ Job {job.job_id} failed: {error_msg}")
-        await fail_job(job.job_id, error_msg)
+        print(f"\n[Pipeline] FATAL ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        await fail_job(job.job_id, str(e))
         job.status = "failed"
-        job.error = error_msg
+        job.error = str(e)
         return job
-
-
-async def run_pipeline_background(request: RunRequest, job_id: str) -> None:
-    """
-    Runs the pipeline in the background (used with FastAPI BackgroundTasks).
-    The job_id is pre-created so the API can return it immediately.
-    """
-    await run_pipeline(request)

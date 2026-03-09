@@ -172,3 +172,18 @@ async def run_platform_searches(user_query: str, platforms: List[str] = None) ->
 async def run_google_snippets_scraper(user_query: str) -> List[RawLead]:
     """Main entry point for the Google Snippets scraper."""
     return await run_platform_searches(user_query)
+
+# ── Add events/webinar queries to existing platform map ───
+PLATFORM_QUERIES["webinars"] = [
+    "site:eventbrite.com {query} Dubai property investor",
+    "site:meetup.com {query} Dubai real estate investors",
+    "{query} Dubai property webinar seminar attendee investor 2024 OR 2025",
+    "{query} Cityscape Dubai investor OR exhibitor OR attendee",
+]
+
+PLATFORM_QUERIES["seminars_expos"] = [
+    "{query} \"Dubai Property Show\" OR \"Cityscape\" investor attendee",
+    "{query} real estate expo exhibition Dubai investor speaker",
+    "{query} \"Gulf Investment Forum\" OR \"MENA Real Estate\" investor 2024",
+    "site:linkedin.com {query} attended Cityscape Dubai investor",
+]
